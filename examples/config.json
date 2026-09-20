@@ -1,0 +1,26 @@
+{
+  "_comment": "Config for the synthetic example data. Run: python biolector_plot.py --config examples/config.json",
+  "media": {
+    "X1": "oMLP 50 g/L",
+    "X2": "oMLP 0 g/L",
+    "X3": "oMLP pH 3",
+    "X4": "oMLP pH 8"
+  },
+  "files": [
+    {"file": "data/strain_A.csv", "strains": ["Strain A"]},
+    {"file": "data/strain_B.csv", "strains": ["Strain B"]},
+    {"file": "data/strain_C.csv", "strains": ["Strain C"]},
+    {"file": "data/strain_D_E.csv", "strains": ["Strain D", "Strain E"]}
+  ],
+  "reference_correction": true,
+  "biomass_gain": null,
+  "output_dir": "plots",
+  "results_dir": "results",
+  "growth": {
+    "window_hours": 2.0,
+    "min_points": 5,
+    "r2_min": 0.95,
+    "n_baseline": 3,
+    "background": "blanks"
+  }
+}

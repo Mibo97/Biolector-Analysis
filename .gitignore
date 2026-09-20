@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+# generated outputs
+plots/
+results/
+examples/plots/
+examples/results/
