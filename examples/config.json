@@ -21,6 +21,6 @@
     "min_points": 5,
     "r2_min": 0.95,
     "n_baseline": 3,
-    "background": "blanks"
+    "background": "fit"
   }
 }

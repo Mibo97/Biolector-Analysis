@@ -1,11 +1,16 @@
 # BioLector growth-curve plotting
 
-Plots scattered-light (biomass) growth curves from raw **BioLector I** CSV exports and
+Plots scattered-light (biomass) growth curves from **BioLector I** CSV exports and
 estimates the maximum growth rate and lag time per condition.
 
+Both BioLection export flavours are read automatically: the raw file
+(`FILENAME;...` header, one row per reading) and the processed export
+(`FILE NAME;...` header, `WELL No.;CONTENT;...` table with readings as columns,
+decimal commas). The files in `data/` are the processed kind.
+
 Experiment layout this is built for: 5 strains × 4 media × 5 replicates on 96-well
-plates, one plate per strain except one plate that carries two strains. Blank wells are
-not plotted, but their mean level is used as the background for the growth-rate fit.
+plates, one plate per strain except one plate that carries two strains. Blank wells
+(CONTENT `B1`…`B4`, one code per medium) are not plotted.
 
 ## Setup
 
@@ -15,14 +20,17 @@ pip install -r requirements.txt
 
 ## Usage
 
-1. Copy the four raw CSV files (as written by the BioLection software, first line
-   `FILENAME;...`) into `data/`.
+1. Put the CSV files into `data/`.
 2. Edit `config.json`:
    - `media`: CONTENT code → medium label. The default is X1 = oMLP 50 g/L,
      X2 = oMLP 0 g/L, X3 = oMLP pH 3, X4 = oMLP pH 8.
-   - `files`: one entry per CSV with the file path and the strain name(s). For the
-     plate with two strains list both, e.g. `"strains": ["Strain 4", "Strain 5"]`:
-     the first strain gets X1–X4, the second X5–X8.
+   - `files`: one entry per CSV with the file path and the strain name(s). Use forward
+     slashes (`data/file.csv`), a backslash is not valid in JSON. For the plate with two
+     strains list both, e.g. `"strains": ["WT", "BSA"]`: the first strain gets X1–X4,
+     the second X5–X8.
+   - `biomass_gain`: which Biomass filterset to use when the file has several gains.
+     Gain 30 is set because gains 40 and 50 saturate in the growing wells (the script
+     warns about saturated channels).
 3. Run:
 
 ```bash
@@ -54,9 +62,9 @@ python biolector_plot.py --config examples/config.json --png --replicates
 
 ## How the numbers are computed
 
-- **Signal**: the `Biomass` filterset, corrected with the instrument reference
-  (`amplitude × reference value / cycle reference`), the same as BioLection does.
-  If a file has two Biomass filtersets (two gains) set `biomass_gain` in the config.
+- **Signal**: the `Biomass` filterset with the configured gain. Raw files are corrected
+  with the instrument reference (`amplitude × reference value / cycle reference`), the
+  same as BioLection does; processed exports are already corrected.
 - **Mean ± SD**: replicates are grouped per measurement cycle.
 - **µmax** (1/h): steepest slope of ln(signal − background) in a sliding window of
   `window_hours` (default 2 h). Only windows with R² ≥ `r2_min` (0.95) and signal above
@@ -65,11 +73,21 @@ python biolector_plot.py --config examples/config.json --png --replicates
 - **Doubling time**: ln 2 / µmax.
 - **Lag time** (h): tangent method, the time where the µmax tangent crosses the initial
   level (mean of the first `n_baseline` cycles).
-- **Background** (`growth.background`): `"blanks"` (default) uses the mean signal of the
-  blank wells of the same file (CONTENT codes starting with `B`); alternatives are a
-  number, a `{medium: number}` dict, `"initial"` (subtract each well's own starting
-  level; this disables the lag estimate), or `0`. Without background subtraction the
-  offset in the scattered-light signal makes µmax come out too low.
+- **Background** (`growth.background`): the scattered-light signal has a large constant
+  offset (medium + plate, about 30 a.u. here) that must be removed before the log fit,
+  otherwise µmax comes out far too low. Options:
+  - `"fit"` (default): estimates the offset per well from the curve itself, as the
+    constant that makes ln(signal − offset) most linear over the early growth phase.
+    Needs no blanks.
+  - `"blanks"`: mean signal of the blank wells of the same medium and file (B1 → medium 1,
+    …). Not usable for the data in `data/`: the blank wells drift far above the samples.
+  - `"initial"`: subtracts `initial_fraction` (default 0.9) of each well's own starting
+    level; the remainder is taken as the inoculum signal.
+  - a number, or a `{medium: number}` dict.
+
+  µmax is fairly insensitive to the choice; the lag time is the least robust output
+  because it depends on the small difference between the starting level and the offset.
+  Compare the `flag` and `background` columns in the per-well table when in doubt.
 
 ## If the CONTENT codes are different
 

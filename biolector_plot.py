@@ -11,12 +11,13 @@ Usage
 
 What it does
 ------------
-1. Parses raw BioLector I CSV exports (BioLection 3.x, ``FILENAME;...`` header).
-2. Picks the "Biomass" filterset and applies the standard reference correction
-   (``amplitude * reference_value / cycle_reference``), like the BioLection software.
+1. Parses BioLector I CSV exports: the raw file (``FILENAME;...`` header, one row per
+   reading) and the processed BioLection export (``FILE NAME;...`` header, wide table).
+2. Picks the "Biomass" filterset (configurable gain). Raw files get the standard
+   reference correction (``amplitude * reference_value / cycle_reference``).
 3. Maps the CONTENT codes (X1, X2, ...) to strain + medium using ``config.json``.
-   Blank wells (CONTENT ``B...``) are not plotted; their mean level serves as the
-   background for the growth-rate fit. Other unmapped codes are ignored.
+   Blank wells (CONTENT ``B1``.. = one per medium) are not plotted. Other unmapped
+   codes are ignored.
 4. Plots one figure with one subplot per medium; every strain is a line (mean of
    the replicates) with a shaded +/- 1 SD band. Saved as PDF.
 5. Estimates the maximum specific growth rate (sliding-window regression on the
@@ -169,6 +170,107 @@ def parse_biolector1(path: Path) -> dict:
     return {"metadata": metadata, "filtersets": filtersets, "references": references, "measurements": measurements}
 
 
+def parse_biolection_wide(path: Path) -> dict:
+    """Parse a BioLection *processed* export (``FILE NAME;...`` header, ``WELL No.;CONTENT;...`` table).
+
+    In this format every row is one well x channel and the readings are columns. Times come
+    from the ``TIME [h] ->`` row. Numbers use a decimal comma. Channels named ``Blanked.N`` or
+    ``Cal.*`` (BioLection's own blank subtraction / calibration) are skipped; only the raw
+    filterset channels (1, 2, ...) are kept. The data are already reference corrected.
+    """
+    lines = _read_lines(path)
+    sep = ";"
+
+    table_start = None
+    for i, line in enumerate(lines):
+        if line.upper().startswith("WELL NO"):
+            table_start = i
+            break
+    if table_start is None:
+        raise ValueError(f"{path.name}: no 'WELL No.;CONTENT;...' table found.")
+    header_lines = lines[:table_start]
+
+    metadata: dict = {}
+    for line in header_lines:
+        parts = [x.strip() for x in line.split(sep)]
+        if len(parts) >= 2 and parts[0]:
+            metadata[parts[0]] = parts[1]
+
+    # filterset table: header 'FILTERSET;FILTERNAME;...', then numbered rows
+    fs_rows, fs_cols = [], None
+    for line in header_lines:
+        if line.startswith("FILTERSET;"):
+            fs_cols = [c.strip() for c in line.split(sep)]
+            continue
+        if fs_cols is not None:
+            parts = [x.strip() for x in line.split(sep)]
+            if parts and parts[0].isdigit():
+                fs_rows.append(dict(zip(fs_cols, parts)))
+            elif fs_rows:
+                break
+    if not fs_rows:
+        raise ValueError(f"{path.name}: no FILTERSET definitions found in the header.")
+    filtersets = pd.DataFrame(fs_rows)
+    filtersets["FILTERSET"] = filtersets["FILTERSET"].astype(int)
+    for c in ("GAIN", "REFERENCE VALUE"):
+        if c in filtersets:
+            filtersets[c] = _to_float(filtersets[c])
+
+    # time row
+    times = None
+    for line in lines[table_start + 1 : table_start + 6]:
+        parts = line.split(sep)
+        if len(parts) > 3 and parts[3].strip().upper().startswith("TIME"):
+            times = _to_float(pd.Series(parts[4:])).to_numpy()
+            break
+    if times is None:
+        raise ValueError(f"{path.name}: no 'TIME [h] ->' row found under the well table.")
+
+    records = []
+    for line in lines[table_start + 1 :]:
+        parts = line.split(sep)
+        if len(parts) < 5:
+            continue
+        well, content, _desc, channel = (x.strip() for x in parts[:4])
+        if not well or not channel.isdigit():
+            continue  # time/reading rows, ACT.TEMP rows, Blanked.* and Cal.* channels
+        vals = _to_float(pd.Series(parts[4 : 4 + len(times)])).to_numpy()
+        n = min(len(vals), len(times))
+        for k in range(n):
+            if np.isfinite(vals[k]) and np.isfinite(times[k]):
+                records.append((k + 1, well, content, int(channel), times[k], vals[k]))
+    if not records:
+        raise ValueError(f"{path.name}: no measurement rows found in the well table.")
+    measurements = pd.DataFrame(records, columns=["cycle", "well", "content", "filterset", "time", "amplitude"])
+    references = pd.DataFrame(columns=["cycle", "filterset", "time", "amplitude"])
+    return {"metadata": metadata, "filtersets": filtersets, "references": references, "measurements": measurements}
+
+
+def parse_biolector_file(path: Path) -> dict:
+    """Detect the export flavour and parse it."""
+    first = _read_lines(path)[0].upper().replace(" ", "") if path.stat().st_size else ""
+    if first.startswith("FILENAME;"):
+        text = path.read_bytes()[:20000].decode("latin-1").upper()
+        if "WELL NO." in text and "READING;WELLNUM" not in text:
+            return parse_biolection_wide(path)
+        return parse_biolector1(path)
+    raise ValueError(f"{path.name}: unknown format (first line: {first[:40]!r}). Expected a BioLector I export.")
+
+
+def saturation_report(m: pd.DataFrame, filtersets: pd.DataFrame) -> None:
+    """Warn about channels whose values pile up at a ceiling (detector saturation)."""
+    for fs_num, g in m.groupby("filterset"):
+        v = g["amplitude"].dropna().to_numpy()
+        if len(v) == 0:
+            continue
+        frac = float(np.mean(v >= 0.98 * v.max()))
+        row = filtersets[filtersets["FILTERSET"] == fs_num]
+        gain = row["GAIN"].iloc[0] if not row.empty and "GAIN" in row else np.nan
+        if frac > 0.02:
+            print(f"  WARNING: filterset {fs_num} (gain {gain:g}) looks saturated: "
+                  f"{frac:.0%} of the values sit at the ceiling ({v.max():.1f}). Do not use this gain.")
+
+
 def biomass_signal(parsed: dict, gain: float | None = None, reference_correction: bool = True) -> pd.DataFrame:
     """Return the scattered-light signal as a long DataFrame (well, content, cycle, time, value)."""
     fs = parsed["filtersets"]
@@ -181,8 +283,10 @@ def biomass_signal(parsed: dict, gain: float | None = None, reference_correction
             raise ValueError(f"No Biomass filterset with gain {gain}. Available gains: {bio['GAIN'].tolist()}")
         bio = sel
     if len(bio) > 1:
-        print(f"  note: {len(bio)} Biomass filtersets (gains {bio['GAIN'].tolist()}), using the first one. "
-              f"Set 'biomass_gain' in the config to choose another.")
+        print(f"  note: {len(bio)} Biomass filtersets (gains {bio['GAIN'].tolist()}), using gain "
+              f"{bio.iloc[0]['GAIN']:g}. Set 'biomass_gain' in the config to choose another.")
+    elif gain is not None:
+        print(f"  using Biomass filterset with gain {bio.iloc[0]['GAIN']:g}")
     fs_num = int(bio.iloc[0]["FILTERSET"])
     ref_value = float(bio.iloc[0].get("REFERENCE VALUE", np.nan))
 
@@ -236,6 +340,45 @@ def build_content_map(entry: dict, media: dict) -> dict[str, tuple[str, str]]:
 # ----------------------------------------------------------------------------------
 # Growth parameters
 # ----------------------------------------------------------------------------------
+def fit_background(t: np.ndarray, y: np.ndarray, n_grid: int = 200) -> float:
+    """Estimate the constant signal offset (medium + plate) from the growth curve itself.
+
+    The early part of the curve (from the start until the signal has covered half of its
+    total increase) is modelled as ``offset + N0 * exp(mu * t)``. The offset is found by a
+    grid search: the value for which ln(y - offset) is most linear in time (highest R^2).
+    """
+    ok = np.isfinite(t) & np.isfinite(y)
+    t, y = t[ok], y[ok]
+    if len(t) < 8:
+        return 0.0
+    order = np.argsort(t)
+    t, y = t[order], y[order]
+    # smooth a little to find the level and the half-rise point
+    k = min(5, len(y))
+    ys = np.convolve(y, np.ones(k) / k, mode="same")
+    y_lo, y_hi = float(np.min(ys)), float(np.max(ys))
+    if y_hi - y_lo <= 0:
+        return 0.0
+    i_min = int(np.argmin(ys))
+    half = y_lo + 0.5 * (y_hi - y_lo)
+    after = np.where(ys[i_min:] >= half)[0]
+    i_end = i_min + (int(after[0]) if len(after) else len(ys) - i_min)
+    seg_t, seg_y = t[i_min:i_end + 1], y[i_min:i_end + 1]
+    if len(seg_t) < 6:
+        return 0.0
+    best_bg, best_r2 = 0.0, -np.inf
+    for bg in np.linspace(0.0, 0.995 * float(np.min(seg_y)), n_grid):
+        ln_y = np.log(seg_y - bg)
+        slope, intercept = np.polyfit(seg_t, ln_y, 1)
+        pred = slope * seg_t + intercept
+        ss_res = float(np.sum((ln_y - pred) ** 2))
+        ss_tot = float(np.sum((ln_y - ln_y.mean()) ** 2))
+        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else -np.inf
+        if slope > 0 and r2 > best_r2:
+            best_bg, best_r2 = float(bg), r2
+    return best_bg
+
+
 def growth_parameters(t: np.ndarray, y: np.ndarray, window_hours: float = 2.0, min_points: int = 5,
                       r2_min: float = 0.95, n_baseline: int = 3, background: float = 0.0) -> dict:
     """Estimate mu_max (1/h), doubling time (h), lag time (h) and max signal for one well.
@@ -306,22 +449,46 @@ def growth_parameters(t: np.ndarray, y: np.ndarray, window_hours: float = 2.0, m
 # ----------------------------------------------------------------------------------
 # Main pipeline
 # ----------------------------------------------------------------------------------
+def load_config(cfg_path: Path) -> dict:
+    """Read the JSON config; tolerate Windows backslashes in paths (an invalid JSON escape)."""
+    text = cfg_path.read_text(encoding="utf-8-sig")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as err:
+        try:
+            cfg = json.loads(text.replace("\\", "/"))
+        except json.JSONDecodeError:
+            raise SystemExit(
+                f"{cfg_path} is not valid JSON: {err}. Use forward slashes in paths (data/file.csv) "
+                f"and check for missing commas or quotes."
+            ) from err
+        print(f"note: backslashes in {cfg_path.name} were read as '/'. Please use forward slashes in paths.")
+        return cfg
+
+
+def resolve_data_path(entry_file: str, config_dir: Path) -> Path:
+    """Accept 'data/x.csv', 'x.csv' (looked up in data/), or an absolute path."""
+    path = Path(entry_file)
+    candidates = [path] if path.is_absolute() else [config_dir / path, config_dir / "data" / path.name]
+    for c in candidates:
+        if c.exists():
+            return c
+    data_dir = config_dir / "data"
+    found = sorted(p.name for p in data_dir.glob("*.csv")) if data_dir.exists() else []
+    raise FileNotFoundError(
+        f"{entry_file} not found. CSV files present in {data_dir}: {found or 'none'}. "
+        f"Fix the 'file' entries in the config (use forward slashes, e.g. data/file.csv)."
+    )
+
+
 def load_all(config: dict, config_dir: Path) -> pd.DataFrame:
     media = config["media"]
     frames = []
     for entry in config["files"]:
-        path = Path(entry["file"])
-        if not path.is_absolute():
-            path = config_dir / path
-        if not path.exists():
-            data_dir = config_dir / "data"
-            found = sorted(p.name for p in data_dir.glob("*.csv")) if data_dir.exists() else []
-            raise FileNotFoundError(
-                f"{path} not found. CSV files present in {data_dir}: {found or 'none'}. "
-                f"Fix the 'file' entries in the config."
-            )
+        path = resolve_data_path(entry["file"], config_dir)
         print(f"Reading {path.name}")
-        parsed = parse_biolector1(path)
+        parsed = parse_biolector_file(path)
+        saturation_report(parsed["measurements"], parsed["filtersets"])
         sig = biomass_signal(parsed, gain=config.get("biomass_gain"),
                              reference_correction=config.get("reference_correction", True))
         cmap = build_content_map(entry, media)
@@ -345,8 +512,20 @@ def load_all(config: dict, config_dir: Path) -> pd.DataFrame:
         is_blank = sig["content"].str.upper().str.startswith(blank_prefix.upper()) & ~sig["content"].isin(cmap)
         sig = sig[sig["content"].isin(cmap) | is_blank].copy()
         sig["is_blank"] = ~sig["content"].isin(cmap)
-        sig["strain"] = sig["content"].map(lambda c: cmap.get(c, ("blank", "blank"))[0])
-        sig["medium"] = sig["content"].map(lambda c: cmap.get(c, ("blank", "blank"))[1])
+        # blank code B<k> belongs to medium k (B1 -> first medium, ...); B5.. wrap around
+        media_labels = list(media.values())
+
+        def blank_medium(code: str) -> str:
+            mm = CONTENT_RE.match(code)
+            if mm and media_labels:
+                return media_labels[(int(mm.group(2)) - 1) % len(media_labels)]
+            return "blank"
+
+        sig["strain"] = sig["content"].map(lambda c: cmap[c][0] if c in cmap else "blank")
+        sig["medium"] = sig["content"].map(lambda c: cmap[c][1] if c in cmap else blank_medium(c))
+        blank_codes = sorted(sig.loc[sig["is_blank"], "content"].unique(), key=lambda c: int(CONTENT_RE.match(c).group(2)) if CONTENT_RE.match(c) else 0)
+        if blank_codes:
+            print("  blanks: " + ", ".join(f"{c} -> {blank_medium(c)} ({sig[sig['content'] == c]['well'].nunique()} wells)" for c in blank_codes))
         sig["file"] = path.name
         frames.append(sig)
     return pd.concat(frames, ignore_index=True)
@@ -460,30 +639,40 @@ def resolve_background(cfg_bg, data: pd.DataFrame) -> dict[tuple[str, str], floa
     if cfg_bg == "blanks":
         out = {}
         for f, m in keys:
-            b = data[(data["file"] == f) & data["is_blank"]]["value"]
+            blanks = data[(data["file"] == f) & data["is_blank"]]
+            b = blanks[blanks["medium"] == m]["value"]
+            note = ""
+            if b.empty:
+                b = blanks["value"]
+                note = " (no blank for this medium, all blanks of the file used)"
             if b.empty:
                 print(f"  WARNING: no blank wells in {f}; background set to 0 for the growth-rate fit")
                 out[(f, m)] = 0.0
             else:
                 out[(f, m)] = float(b.mean())
-        for f in sorted({f for f, _ in out}):
-            print(f"  background from blanks in {f}: {out[(f, keys[[k[0] for k in keys].index(f)][1])]:.2f}")
+                print(f"  background for {m} in {f}: {out[(f, m)]:.2f}{note}")
         return out
     if cfg_bg == "initial":
         return {k: "initial" for k in keys}
+    if cfg_bg == "fit":
+        return {k: "fit" for k in keys}
     raise ValueError(f"Unknown growth.background setting: {cfg_bg!r}")
 
 
 def compute_growth_tables(data: pd.DataFrame, cfg: dict, media_order: list[str], strain_order: list[str]):
     rows = []
     samples = data[~data["is_blank"]]
-    backgrounds = resolve_background(cfg.get("background", "blanks"), data)
+    backgrounds = resolve_background(cfg.get("background", "fit"), data)
     for (strain, medium, well, file), w in samples.groupby(["strain", "medium", "well", "file"]):
         bg = backgrounds[(file, medium)]
         t, y = w["time"].to_numpy(float), w["value"].to_numpy(float)
         n_baseline = cfg.get("n_baseline", 3)
         if bg == "initial":
-            bg = float(np.nanmean(np.sort(y[np.argsort(t)][:n_baseline])))
+            # subtract most of the starting level; the rest is taken as the inoculum signal
+            frac = float(cfg.get("initial_fraction", 0.9))
+            bg = frac * float(np.nanmean(y[np.argsort(t)][:n_baseline]))
+        elif bg == "fit":
+            bg = fit_background(t, y)
         res = growth_parameters(
             t, y, window_hours=cfg.get("window_hours", 2.0), min_points=cfg.get("min_points", 5),
             r2_min=cfg.get("r2_min", 0.95), n_baseline=n_baseline, background=float(bg),
@@ -517,7 +706,7 @@ def main(argv=None) -> int:
     if not cfg_path.exists():
         print(f"Config {cfg_path} not found.", file=sys.stderr)
         return 1
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg = load_config(cfg_path)
     config_dir = cfg_path.resolve().parent
 
     data = load_all(cfg, config_dir)

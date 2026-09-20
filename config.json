@@ -1,5 +1,5 @@
 {
-  "_comment": "Edit 'file' paths and strain names. Media: CONTENT code -> label. For a plate with two strains, the second strain uses the next block of codes (X5..X8).",
+  "_comment": "Media: CONTENT code -> label. Files: path (forward slashes!) and strain name(s). On the plate with two strains the first strain uses X1..X4 and the second X5..X8. Blanks B1..B4 belong to media 1..4.",
   "media": {
     "X1": "oMLP 50 g/L",
     "X2": "oMLP 0 g/L",
@@ -7,13 +7,13 @@
     "X4": "oMLP pH 8"
   },
   "files": [
-    {"file": "data/strain_1.csv", "strains": ["Strain 1"]},
-    {"file": "data/strain_2.csv", "strains": ["Strain 2"]},
-    {"file": "data/strain_3.csv", "strains": ["Strain 3"]},
-    {"file": "data/strain_4_5.csv", "strains": ["Strain 4", "Strain 5"]}
+    {"file": "data/260811_Aureo-WT+BSA.csv", "strains": ["WT", "BSA"]},
+    {"file": "data/260818_Aureo-BSO.csv", "strains": ["BSO"]},
+    {"file": "data/260827_Aureo_BSG.csv", "strains": ["BSG"]},
+    {"file": "data/260908_Aureo_BSPH.csv", "strains": ["BSPH"]}
   ],
+  "biomass_gain": 30,
   "reference_correction": true,
-  "biomass_gain": null,
   "output_dir": "plots",
   "results_dir": "results",
   "growth": {
@@ -21,6 +21,6 @@
     "min_points": 5,
     "r2_min": 0.95,
     "n_baseline": 3,
-    "background": "blanks"
+    "background": "fit"
   }
 }
