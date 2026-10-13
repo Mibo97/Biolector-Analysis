@@ -5,7 +5,7 @@ Usage
 -----
     python biolector_plot.py                     # uses config.json
     python biolector_plot.py --config my.json    # other config
-    python biolector_plot.py --log               # log-scaled y axis
+    python biolector_plot.py --linear            # linear y axis (default is semi-logarithmic)
     python biolector_plot.py --replicates        # extra QC PDF with every single replicate
     python biolector_plot.py --png               # also save the main figure as PNG
 
@@ -19,7 +19,7 @@ What it does
    Blank wells (CONTENT ``B1``.. = one per medium) are not plotted. Other unmapped
    codes are ignored.
 4. Plots one figure with one subplot per medium; every strain is a line (mean of
-   the replicates) with a shaded +/- 1 SD band. Saved as PDF.
+   the replicates) with a shaded +/- 1 SD band, semi-logarithmic y axis. Saved as PDF.
 5. Estimates the maximum specific growth rate (sliding-window regression on the
    natural log of the signal) and the lag time (tangent method) for every well and
    writes per-well and per-condition summary tables as CSV.
@@ -531,8 +531,24 @@ def load_all(config: dict, config_dir: Path) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def apply_log_axis(ax) -> None:
+    """Semi-logarithmic y axis with plain numbers on major and minor ticks."""
+    from matplotlib.ticker import LogLocator, ScalarFormatter
+    ax.set_yscale("log")
+    ax.yaxis.set_major_locator(LogLocator(base=10, numticks=10))
+    ax.yaxis.set_minor_locator(LogLocator(base=10, subs=(2, 3, 4, 5, 6, 7, 8, 9), numticks=20))
+    fmt = ScalarFormatter()
+    fmt.set_scientific(False)
+    ax.yaxis.set_major_formatter(fmt)
+    minor_fmt = ScalarFormatter()
+    minor_fmt.set_scientific(False)
+    ax.yaxis.set_minor_formatter(minor_fmt)
+    ax.tick_params(axis="y", which="minor", labelsize=7)
+    ax.grid(True, which="minor", axis="y", color="#f0f0ee", lw=0.5)
+
+
 def plot_conditions(data: pd.DataFrame, media_order: list[str], strain_order: list[str], out_pdf: Path,
-                    log_y: bool = False, title: str | None = None, band: str = "sd") -> None:
+                    log_y: bool = True, title: str | None = None, band: str = "sd") -> None:
     n_media = len(media_order)
     ncols = 2 if n_media > 1 else 1
     nrows = int(np.ceil(n_media / ncols))
@@ -557,13 +573,17 @@ def plot_conditions(data: pd.DataFrame, media_order: list[str], strain_order: li
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
         if log_y:
-            ax.set_yscale("log")
+            apply_log_axis(ax)
     for ax in axes.flat[n_media:]:
         ax.set_visible(False)
     for ax in axes[-1, :]:
         ax.set_xlabel("Time (h)")
     for ax in axes[:, 0]:
         ax.set_ylabel("Scattered light (a.u.)")
+    if log_y:
+        pos = data["value"][data["value"] > 0]
+        if not pos.empty:
+            axes.flat[0].set_ylim(pos.quantile(0.002) / 1.1, pos.quantile(0.998) * 1.1)
 
     handles, labels = axes.flat[0].get_legend_handles_labels()
     if not handles:
@@ -582,7 +602,7 @@ def plot_conditions(data: pd.DataFrame, media_order: list[str], strain_order: li
 
 
 def plot_replicates(data: pd.DataFrame, media_order: list[str], strain_order: list[str], out_pdf: Path,
-                    log_y: bool = False) -> None:
+                    log_y: bool = True) -> None:
     """QC figure: one page per strain, one subplot per medium, every replicate as a thin line."""
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     with PdfPages(out_pdf) as pdf:
@@ -605,7 +625,7 @@ def plot_replicates(data: pd.DataFrame, media_order: list[str], strain_order: li
                 for side in ("top", "right"):
                     ax.spines[side].set_visible(False)
                 if log_y:
-                    ax.set_yscale("log")
+                    apply_log_axis(ax)
                 if ax.get_legend_handles_labels()[0]:
                     ax.legend(fontsize=7, frameon=False, ncol=2)
             for ax in axes.flat[n_media:]:
@@ -696,7 +716,8 @@ def compute_growth_tables(data: pd.DataFrame, cfg: dict, media_order: list[str],
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default="config.json", help="path to the JSON config (default: config.json)")
-    ap.add_argument("--log", action="store_true", help="log-scaled y axis")
+    ap.add_argument("--linear", action="store_true", help="linear y axis (default: semi-logarithmic)")
+    ap.add_argument("--log", action="store_true", help=argparse.SUPPRESS)  # kept for backwards compatibility
     ap.add_argument("--replicates", action="store_true", help="also write a QC PDF with every replicate")
     ap.add_argument("--sem", action="store_true", help="shade the standard error of the mean instead of the SD")
     ap.add_argument("--png", action="store_true", help="additionally save the main figure as PNG (300 dpi)")
@@ -721,12 +742,13 @@ def main(argv=None) -> int:
     out_dir = config_dir / cfg.get("output_dir", "plots")
     res_dir = config_dir / cfg.get("results_dir", "results")
     band = "sem" if args.sem else "sd"
+    log_y = not args.linear and cfg.get("y_scale", "log") != "linear"
     title = cfg.get("title") or f"Growth curves (mean of replicates, band = ±1 {'SEM' if args.sem else 'SD'})"
     formats = ["pdf"] + (["png"] if args.png else [])
     for fmt in formats:
-        plot_conditions(samples, media_order, strain_order, out_dir / f"growth_curves.{fmt}", log_y=args.log, title=title, band=band)
+        plot_conditions(samples, media_order, strain_order, out_dir / f"growth_curves.{fmt}", log_y=log_y, title=title, band=band)
     if args.replicates:
-        plot_replicates(samples, media_order, strain_order, out_dir / "growth_curves_replicates.pdf", log_y=args.log)
+        plot_replicates(samples, media_order, strain_order, out_dir / "growth_curves_replicates.pdf", log_y=log_y)
 
     per_well, summary = compute_growth_tables(data, cfg.get("growth", {}), media_order, strain_order)
     res_dir.mkdir(parents=True, exist_ok=True)

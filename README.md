@@ -35,7 +35,7 @@ pip install -r requirements.txt
 
 ```bash
 python biolector_plot.py                 # config.json in the current folder
-python biolector_plot.py --log           # log-scaled y axis
+python biolector_plot.py --linear        # linear y axis (default is semi-logarithmic)
 python biolector_plot.py --sem           # shade SEM instead of SD
 python biolector_plot.py --replicates    # extra QC PDF with every single replicate
 python biolector_plot.py --png           # also save the main figure as PNG
@@ -45,7 +45,7 @@ Outputs:
 
 | File | Content |
 |---|---|
-| `plots/growth_curves.pdf` | One subplot per medium, one line per strain (mean of replicates) with ±1 SD band |
+| `plots/growth_curves.pdf` | One subplot per medium, one line per strain (mean of replicates) with ±1 SD band, semi-logarithmic y axis |
 | `plots/growth_curves_replicates.pdf` | Optional: every replicate as a single line, one page per strain |
 | `results/growth_parameters_summary.csv` | Per condition: mean ± SD of µmax, doubling time, lag time, max signal |
 | `results/growth_parameters_per_well.csv` | The same per well, with R² and a `flag` column for questionable fits |
